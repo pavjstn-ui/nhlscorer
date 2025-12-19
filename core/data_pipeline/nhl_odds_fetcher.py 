@@ -1,0 +1,99 @@
+"""
+NHL Odds Fetcher (The Odds API)
+
+What it does:
+- Fetches NHL odds JSON from The Odds API
+- Saves the raw JSON to services/nhl_goal_scorers/data/raw/
+- Does NOT commit raw files (gitignored)
+
+Why it's written this way:
+- API key comes from env var (never hardcode secrets)
+- Paths resolve from repo root using __file__ (works from anywhere)
+- Saves raw JSON so you can re-run processing without calling API again
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import requests
+
+
+@dataclass(frozen=True)
+class OddsApiConfig:
+    api_key_env: str = "ODDS_API_KEY"
+    base_url: str = "https://api.the-odds-api.com/v4"
+    sport_key: str = "icehockey_nhl"
+    regions: str = "eu"  # EU books; alternative: "us", "uk", "au"
+    odds_format: str = "decimal"
+    date_format: str = "iso"
+    # Market name can vary by provider/account plan.
+    # We'll start by fetching odds with markets you set later.
+    markets: str = "player_goal_scorer_anytime"
+
+
+def _project_root() -> Path:
+    # core/data_pipeline/... -> parents[2] = repo root
+    return Path(__file__).resolve().parents[2]
+
+
+def _raw_dir() -> Path:
+    return _project_root() / "services" / "nhl_goal_scorers" / "data" / "raw"
+
+
+def fetch_nhl_player_anytime_goalscorer_odds(
+    config: OddsApiConfig = OddsApiConfig(),
+    out_filename: Optional[str] = None,
+) -> Path:
+    """
+    Fetch NHL odds for the anytime goalscorer market and save raw JSON.
+    Returns the saved file path.
+    """
+
+    api_key = os.getenv(config.api_key_env)
+    if not api_key:
+        raise EnvironmentError(
+            f"Missing API key. Set environment variable {config.api_key_env}.\n"
+            f"Example (macOS zsh): export {config.api_key_env}='YOUR_KEY_HERE'"
+        )
+
+    raw_dir = _raw_dir()
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # Default output file name includes UTC date for reproducibility
+    if out_filename is None:
+        today = datetime.now(timezone.utc).strftime("%Y_%m_%d")
+        out_filename = f"odds_anytime_goalscorer_{today}.json"
+
+    out_path = raw_dir / out_filename
+
+    # Endpoint: /sports/{sport}/odds
+    url = f"{config.base_url}/sports/{config.sport_key}/odds"
+    params = {
+        "apiKey": api_key,
+        "regions": config.regions,
+        "markets": config.markets,
+        "oddsFormat": config.odds_format,
+        "dateFormat": config.date_format,
+    }
+
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+
+    data: Any = resp.json()
+
+    # Save raw response exactly
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return out_path
+
+
+if __name__ == "__main__":
+    saved = fetch_nhl_player_anytime_goalscorer_odds()
+    print(f"Saved raw odds JSON to: {saved}")

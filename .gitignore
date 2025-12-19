@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+.venv/
+env/
+venv/
+
+# Raw data is NEVER committed
+data/raw/*
+!data/raw/.gitkeep
+
+.DS_Store
+.vscode/
+.idea/
+
+.env
+*.env
