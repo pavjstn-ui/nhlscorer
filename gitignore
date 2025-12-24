@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Environments
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Jupyter noise
+.ipynb_checkpoints/
+
+# Local junk
+.virtual_documents/
+
+# Secrets
+.env
+.env.*
+
+# Data (raw + generated outputs)
+data/raw/
+data/processed/
+
+# Common outputs
+nhl_schedule_today.csv
+notebooks/*.csv
+notebooks/nhl_2025_26_current_season.csv
+
