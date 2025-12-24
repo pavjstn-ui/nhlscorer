@@ -16,3 +16,26 @@ data/raw/*
 
 .env
 *.env
+# Environments
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Data (raw + generated)
+data/raw/
+data/processed/
+*.csv
+*.json
+
+# Allow small templates if you want
+!inputs/*.csv
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Notebooks noise
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
