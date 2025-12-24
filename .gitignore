@@ -1,41 +1,29 @@
-__pycache__/
-*.py[cod]
-.ipynb_checkpoints/
-
-.venv/
-env/
-venv/
-
-# Raw data is NEVER committed
-data/raw/*
-!data/raw/.gitkeep
-
+# macOS
 .DS_Store
-.vscode/
-.idea/
+**/.DS_Store
 
-.env
-*.env
 # Environments
 venv/
 .venv/
 __pycache__/
 *.pyc
 
-# Data (raw + generated)
-data/raw/
-data/processed/
-*.csv
-*.json
-
-# Allow small templates if you want
-!inputs/*.csv
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-
-# Notebooks noise
+# Jupyter noise
 .ipynb_checkpoints/
+
+# Local junk
+.virtual_documents/
 
 # Secrets
 .env
 .env.*
+
+# Data (raw + generated outputs)
+data/raw/
+data/processed/
+
+# Common outputs
+nhl_schedule_today.csv
+notebooks/*.csv
+notebooks/nhl_2025_26_current_season.csv
+

@@ -1,0 +1,30 @@
+.
+├── README.md
+├── STRUCTURE.txt
+├── Untitled.ipynb
+├── Untitled1.ipynb
+├── core
+│   └── data_pipeline
+│       ├── ev_anytime_goalscorer.py
+│       ├── ev_h2h.py
+│       ├── nhl_odds_fetcher.py
+│       ├── nhl_pipeline.py
+│       └── odds_parse_anytime.py
+├── data
+│   ├── processed
+│   │   ├── anytime_goalscorer_ev.csv
+│   │   ├── odds_anytime_goalscorer.csv
+│   │   ├── player_goal_rates.csv
+│   │   └── player_signal_table.csv
+│   └── raw
+│       ├── moneypuck_skaters_2023_2024_regular.csv
+│       └── odds_anytime_goalscorer_2025_12_19.json
+├── docs
+│   └── PROJECT_BLUEPRINT.md
+├── notebooks
+│   ├── 01_inspect_moneypuck_2023_2024.ipynb
+│   ├── 02_odds_debug.ipynb
+│   └── Untitled.ipynb
+└── requirements.txt
+
+8 directories, 20 files

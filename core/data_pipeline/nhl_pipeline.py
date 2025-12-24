@@ -21,8 +21,11 @@ def run_moneypuck_goal_rates_pipeline(
     project_root = Path(__file__).resolve().parents[2]
 
     # 2) Define input/output directories using the repo conventions.
-    raw_dir = project_root / "services" / "nhl_goal_scorers" / "data" / "raw"
-    processed_dir = project_root / "services" / "nhl_goal_scorers" / "data" / "processed"
+    project_root = Path(__file__).resolve().parents[2]
+
+    raw_dir = project_root / "data" / "raw"
+    processed_dir = project_root / "data" / "processed"
+
 
     # 3) Ensure the processed folder exists so saving never fails.
     processed_dir.mkdir(parents=True, exist_ok=True)
