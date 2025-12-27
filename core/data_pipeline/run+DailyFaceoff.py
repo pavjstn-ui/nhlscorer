@@ -56,10 +56,7 @@ def load_dailyfaceoff_pp(paths: Paths, target_date: str) -> pd.DataFrame:
     """
     pp_path = paths.inputs / f"dailyfaceoff_pp_{target_date}.csv"
     if not pp_path.exists():
-            # raise FileNotFoundError(f"Missing DailyFaceoff PP file: {pp_path}")
-            # Optional dependency: if file missing, return empty df and fallback to MoneyPuck inference
-        return pd.DataFrame(columns=["player", "team", "pp_unit", "player_norm"])
-
+        raise FileNotFoundError(f"Missing DailyFaceoff PP file: {pp_path}")
 
     df = pd.read_csv(pp_path)
     df["player_norm"] = df["player"].map(normalize_name)
@@ -123,17 +120,6 @@ def fetch_nhl_schedule_now() -> dict:
     r.raise_for_status()
     return r.json()
 
-def fetch_schedule_for_date(date_str: str) -> dict:
-    """
-    Fetch NHL schedule for a specific date (YYYY-MM-DD).
-    Use this for backtests / historical validation.
-    """
-    url = f"https://api-web.nhle.com/v1/schedule/{date_str}"
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-
 
 def extract_teams_for_date(schedule_json: dict, target_date: str) -> set[str]:
     """
@@ -154,8 +140,6 @@ def extract_teams_for_date(schedule_json: dict, target_date: str) -> set[str]:
             if home:
                 teams.add(home)
     return teams
-    print("[debug] schedule top-level keys:", list(schedule.keys()))
-    print("[debug] schedule payload sample:", str(schedule)[:500])
 
 
 # -----------------------------
@@ -223,19 +207,19 @@ def build_predictions(mp: pd.DataFrame, teams_today: set[str], pp_df: pd.DataFra
             how="left",
         )
 
-        # DailyFaceoff wins when available
-        todays_players["is_pp1"] = (todays_players["pp_unit"] == 1).astype(int)
+    # DailyFaceoff wins when available
+    todays_players["is_pp1"] = (todays_players["pp_unit"] == 1).astype(int)
 
-        # Optional: keep PP2 flag for later modeling
-        todays_players["is_pp2"] = (todays_players["pp_unit"] == 2).astype(int)
+    # Optional: keep PP2 flag for later modeling
+    todays_players["is_pp2"] = (todays_players["pp_unit"] == 2).astype(int)
 
-        # If pp_unit missing (NaN), fallback to MoneyPuck inference
-        # (so we don’t accidentally set everyone to 0)
-        missing_pp = todays_players["pp_unit"].isna()
-        todays_players.loc[missing_pp, "is_pp1"] = todays_players.loc[missing_pp, "is_pp1"].fillna(0).astype(int)
-        todays_players.loc[missing_pp, "is_pp2"] = 0
-    else:
-        todays_players["is_pp2"] = 0
+    # If pp_unit missing (NaN), fallback to MoneyPuck inference
+    # (so we don’t accidentally set everyone to 0)
+    missing_pp = todays_players["pp_unit"].isna()
+    todays_players.loc[missing_pp, "is_pp1"] = todays_players.loc[missing_pp, "is_pp1"].fillna(0).astype(int)
+    todays_players.loc[missing_pp, "is_pp2"] = 0
+else:
+    todays_players["is_pp2"] = 0
 
 
     # Apply PP1 boost (50% increase), cap at 0.35
@@ -248,19 +232,8 @@ def build_predictions(mp: pd.DataFrame, teams_today: set[str], pp_df: pd.DataFra
     * (1 + todays_players["is_pp1"] * pp1_boost)
     )
 
-    # Clamp lambda to avoid absurd probabilities, but don't cap probability directly
-    todays_players["lambda_goal"] = todays_players["lambda_goal"].clip(lower=0.0, upper=1.2)
+    todays_players["goal_probability"] = (1 - np.exp(-todays_players["lambda_goal"])).clip(upper=0.35)
 
-    todays_players["goal_probability"] = 1 - np.exp(-todays_players["lambda_goal"])
-    # ---- FINAL NORMALIZATION FOR CALIBRATION & JOINS ----
-    todays_players["player_norm"] = todays_players["name"].map(normalize_name)
-
-
-    # --- GLOBAL CALIBRATION SHRINKAGE ---
-    SHRINK = 0.65   # start conservative
-    todays_players["lambda_goal"] *= SHRINK
-
-    todays_players["goal_probability"] = 1 - np.exp(-todays_players["lambda_goal"])
 
 
     # Normalized name for downstream merges
@@ -412,11 +385,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--date",
         required=True,
-        help=(
-            "Target date in YYYY-MM-DD. "
-            "For today, uses schedule/now. "
-            "For past dates, uses schedule/YYYY-MM-DD (backtests & calibration)."
-        ),
+        help="Target date in YYYY-MM-DD (must exist in NHL schedule/now window).",
     )
     parser.add_argument(
         "--top",
@@ -424,7 +393,6 @@ def parse_args() -> argparse.Namespace:
         default=25,
         help="How many top predictions to print to console (default 25).",
     )
-
     return parser.parse_args()
 
 
@@ -441,7 +409,6 @@ def main() -> int:
 
     paths = get_paths()
 
-
     # Ensure output dirs exist (gitignored)
     ensure_dir(paths.data_processed)
     ensure_dir(paths.inputs)
@@ -450,38 +417,17 @@ def main() -> int:
     # Load MoneyPuck
     mp = load_moneypuck_skaters_csv(paths)
 
-    from datetime import date
-
-    is_today = (target_date == date.today().isoformat())
-
-    # Fetch schedule for the requested date
-    if is_today:
-        schedule = fetch_nhl_schedule_now()
-    else:
-        schedule = fetch_schedule_for_date(target_date)
-
-    print("[debug] schedule keys:", list(schedule.keys()))
-
+    # Fetch schedule and extract teams for target_date
+    schedule = fetch_nhl_schedule_now()
     teams_today = extract_teams_for_date(schedule, target_date)
 
     if not teams_today:
         print(
-            f"[debug] teams_today empty for {target_date}. schedule keys: {list(schedule.keys())}",
-            file=sys.stderr,
-        )
-        print(
-            f"ERROR: No games found for {target_date} in schedule endpoint response.",
+            f"ERROR: No games found for {target_date} in schedule/now window.\n"
+            "Try again closer to game day, or adjust schedule endpoint strategy.",
             file=sys.stderr,
         )
         return 3
-
-
-
-    if is_today:
-        sched = fetch_schedule_now()
-    else:
-        sched = fetch_schedule_for_date(target_date)
-
 
     # Load DailyFaceoff PP units (fail loudly if missing)
     pp_df = load_dailyfaceoff_pp(paths, target_date)
@@ -489,37 +435,8 @@ def main() -> int:
     # Predictions-only (DailyFaceoff PP overrides MoneyPuck where available)
     pred = build_predictions(mp, teams_today, pp_df=pp_df)
 
-    # === CALIBRATION SNAPSHOT (ALWAYS WRITE, EVEN IF SOME COLS MISSING) ===
-    calib_out = paths.data_processed / f"calibration_snapshot_{target_date}.csv"
-
-    wanted_cols = [
-        "name",
-        "team",
-        "player_norm",
-        "pp_unit",
-        "is_pp1",
-        "is_pp2",
-        "xg_per_game",
-        "toi_per_game",
-        "toi_multiplier",
-        "lambda_goal",
-        "goal_probability",
-    ]
-
-    existing_cols = [c for c in wanted_cols if c in pred.columns]
-    missing_cols = [c for c in wanted_cols if c not in pred.columns]
-
-    pred[existing_cols].to_csv(calib_out, index=False)
-    print(f"Saved calibration snapshot: {calib_out}")
-    if missing_cols:
-        print(f"[warn] snapshot missing cols: {missing_cols}")
-
-
-    # === predictions output ===
     pred_out = paths.data_processed / f"predictions_{target_date}.csv"
     pred.sort_values("goal_probability", ascending=False).to_csv(pred_out, index=False)
-
-
 
 
     # ✅ NEW: log predictions BEFORE odds (so it still logs even if odds are missing)
@@ -529,7 +446,7 @@ def main() -> int:
     # Console preview
     print("\n🎯 TOP PREDICTIONS (probability ranking)")
     preview = pred.sort_values("goal_probability", ascending=False)[
-        ["name","team","pp_unit","is_pp1","is_pp2","xg_per_game","toi_multiplier","lambda_goal","goal_probability"]
+        ["name","team","xg_per_game","toi_per_game","toi_multiplier","lambda_goal","goal_probability","is_pp1"]
     ].head(args.top)
     print(preview.to_string(index=False))
 

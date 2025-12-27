@@ -13,14 +13,14 @@ Behavior (as requested):
 """
 
 from __future__ import annotations
-from datetime import timezone  # put this at the top imports
+
 import argparse
 import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import numpy as np
+
 import pandas as pd
 import requests
 
@@ -44,30 +44,6 @@ def normalize_name(s: str) -> str:
     if pd.isna(s):
         return ""
     return str(s).strip().lower()
-
-def load_dailyfaceoff_pp(paths: Paths, target_date: str) -> pd.DataFrame:
-    """
-    Load DailyFaceoff powerplay units for a given date.
-
-    Expected file:
-      inputs/dailyfaceoff_pp_YYYY-MM-DD.csv
-    Columns:
-      player, team, pp_unit (1 or 2)
-    """
-    pp_path = paths.inputs / f"dailyfaceoff_pp_{target_date}.csv"
-    if not pp_path.exists():
-            # raise FileNotFoundError(f"Missing DailyFaceoff PP file: {pp_path}")
-            # Optional dependency: if file missing, return empty df and fallback to MoneyPuck inference
-        return pd.DataFrame(columns=["player", "team", "pp_unit", "player_norm"])
-
-
-    df = pd.read_csv(pp_path)
-    df["player_norm"] = df["player"].map(normalize_name)
-    df["team"] = df["team"].astype(str).str.upper()
-    df["pp_unit"] = pd.to_numeric(df["pp_unit"], errors="coerce").fillna(0).astype(int)
-
-    return df[["player", "player_norm", "team", "pp_unit"]]
-  
 
 
 @dataclass(frozen=True)
@@ -123,17 +99,6 @@ def fetch_nhl_schedule_now() -> dict:
     r.raise_for_status()
     return r.json()
 
-def fetch_schedule_for_date(date_str: str) -> dict:
-    """
-    Fetch NHL schedule for a specific date (YYYY-MM-DD).
-    Use this for backtests / historical validation.
-    """
-    url = f"https://api-web.nhle.com/v1/schedule/{date_str}"
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-
 
 def extract_teams_for_date(schedule_json: dict, target_date: str) -> set[str]:
     """
@@ -154,16 +119,13 @@ def extract_teams_for_date(schedule_json: dict, target_date: str) -> set[str]:
             if home:
                 teams.add(home)
     return teams
-    print("[debug] schedule top-level keys:", list(schedule.keys()))
-    print("[debug] schedule payload sample:", str(schedule)[:500])
 
 
 # -----------------------------
 # Model: predictions-only (same logic as your status doc)
 # -----------------------------
 
-def build_predictions(mp: pd.DataFrame, teams_today: set[str], pp_df: pd.DataFrame | None = None) -> pd.DataFrame:
-
+def build_predictions(mp: pd.DataFrame, teams_today: set[str]) -> pd.DataFrame:
     """
     Build player goal probabilities using MoneyPuck xG per game + PP1 boost.
 
@@ -183,20 +145,6 @@ def build_predictions(mp: pd.DataFrame, teams_today: set[str], pp_df: pd.DataFra
         todays_players["I_F_xGoals"] / todays_players["games_played"]
     ).fillna(0.0)
 
-    # ---- TOI opportunity features (from MoneyPuck icetime) ----
-    todays_players["toi_per_game"] = (
-        todays_players["icetime"] / todays_players["games_played"]
-    ).fillna(0.0)
-
-    todays_players["team_avg_toi_per_game"] = todays_players.groupby("team")["toi_per_game"].transform("mean")
-
-    todays_players["toi_ratio"] = (
-        todays_players["toi_per_game"] / todays_players["team_avg_toi_per_game"]
-    ).replace([pd.NA, float("inf")], 0.0).fillna(0.0)
-
-    todays_players["toi_multiplier"] = todays_players["toi_ratio"].clip(lower=0.6, upper=1.4)
-
-
     # Determine PP1 via 5on4 icetime rank (top 5 per team)
     mp_pp = mp[mp["situation"] == "5on4"].copy()
     mp_pp["pp_toi_rank"] = mp_pp.groupby("team")["icetime"].rank(
@@ -212,91 +160,18 @@ def build_predictions(mp: pd.DataFrame, teams_today: set[str], pp_df: pd.DataFra
     )
     todays_players["is_pp1"] = todays_players["is_pp1"].fillna(0).astype(int)
 
-    # --- Override PP unit from DailyFaceoff if provided ---
-    if pp_df is not None and not pp_df.empty:
-        # Merge by normalized name + team
-        todays_players["player_norm"] = todays_players["name"].map(normalize_name)
-        todays_players = todays_players.merge(
-            pp_df[["player_norm", "team", "pp_unit"]],
-            left_on=["player_norm", "team"],
-            right_on=["player_norm", "team"],
-            how="left",
-        )
-
-        # DailyFaceoff wins when available
-        todays_players["is_pp1"] = (todays_players["pp_unit"] == 1).astype(int)
-
-        # Optional: keep PP2 flag for later modeling
-        todays_players["is_pp2"] = (todays_players["pp_unit"] == 2).astype(int)
-
-        # If pp_unit missing (NaN), fallback to MoneyPuck inference
-        # (so we don’t accidentally set everyone to 0)
-        missing_pp = todays_players["pp_unit"].isna()
-        todays_players.loc[missing_pp, "is_pp1"] = todays_players.loc[missing_pp, "is_pp1"].fillna(0).astype(int)
-        todays_players.loc[missing_pp, "is_pp2"] = 0
-    else:
-        todays_players["is_pp2"] = 0
-
-
     # Apply PP1 boost (50% increase), cap at 0.35
     # Note: We'll improve calibration later using Poisson transform.
-    # Apply PP1 boost on the rate (lambda), then Poisson -> probability
     pp1_boost = 0.5
-    todays_players["lambda_goal"] = (
-    todays_players["xg_per_game"]
-    * todays_players["toi_multiplier"]
-    * (1 + todays_players["is_pp1"] * pp1_boost)
-    )
-
-    # Clamp lambda to avoid absurd probabilities, but don't cap probability directly
-    todays_players["lambda_goal"] = todays_players["lambda_goal"].clip(lower=0.0, upper=1.2)
-
-    todays_players["goal_probability"] = 1 - np.exp(-todays_players["lambda_goal"])
-    # ---- FINAL NORMALIZATION FOR CALIBRATION & JOINS ----
-    todays_players["player_norm"] = todays_players["name"].map(normalize_name)
-
-
-    # --- GLOBAL CALIBRATION SHRINKAGE ---
-    SHRINK = 0.65   # start conservative
-    todays_players["lambda_goal"] *= SHRINK
-
-    todays_players["goal_probability"] = 1 - np.exp(-todays_players["lambda_goal"])
-
+    todays_players["goal_probability"] = (
+        todays_players["xg_per_game"] * (1 + (todays_players["is_pp1"] * pp1_boost))
+    ).clip(upper=0.35)
 
     # Normalized name for downstream merges
     todays_players["name_norm"] = todays_players["name"].map(normalize_name)
-    # Debug: confirm columns exist
-    assert "lambda_goal" in todays_players.columns, "lambda_goal was not created"
-    assert "goal_probability" in todays_players.columns, "goal_probability was not created"
 
     return todays_players
 
-def append_predictions_log(paths: Paths, target_date: str, pred: pd.DataFrame) -> None:
-    ensure_dir(paths.logs)
-    log_path = paths.logs / "predictions_log.csv"
-
-    out = pred.copy()
-    out.insert(0, "date", target_date)
-    out.insert(1, "logged_at_utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-
-
-    keep = [
-        "date",
-        "logged_at_utc",
-        "name",
-        "team",
-        "xg_per_game",
-        "toi_per_game",
-        "toi_multiplier",
-        "lambda_goal",
-        "goal_probability",
-        "is_pp1",
-    ]
-
-    out = out[keep].rename(columns={"name": "player"})
-
-    write_header = not log_path.exists()
-    out.to_csv(log_path, mode="a", index=False, header=write_header)
 
 # -----------------------------
 # Odds + EV
@@ -412,11 +287,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--date",
         required=True,
-        help=(
-            "Target date in YYYY-MM-DD. "
-            "For today, uses schedule/now. "
-            "For past dates, uses schedule/YYYY-MM-DD (backtests & calibration)."
-        ),
+        help="Target date in YYYY-MM-DD (must exist in NHL schedule/now window).",
     )
     parser.add_argument(
         "--top",
@@ -424,7 +295,6 @@ def parse_args() -> argparse.Namespace:
         default=25,
         help="How many top predictions to print to console (default 25).",
     )
-
     return parser.parse_args()
 
 
@@ -441,7 +311,6 @@ def main() -> int:
 
     paths = get_paths()
 
-
     # Ensure output dirs exist (gitignored)
     ensure_dir(paths.data_processed)
     ensure_dir(paths.inputs)
@@ -450,94 +319,31 @@ def main() -> int:
     # Load MoneyPuck
     mp = load_moneypuck_skaters_csv(paths)
 
-    from datetime import date
-
-    is_today = (target_date == date.today().isoformat())
-
-    # Fetch schedule for the requested date
-    if is_today:
-        schedule = fetch_nhl_schedule_now()
-    else:
-        schedule = fetch_schedule_for_date(target_date)
-
-    print("[debug] schedule keys:", list(schedule.keys()))
-
+    # Fetch schedule and extract teams for target_date
+    schedule = fetch_nhl_schedule_now()
     teams_today = extract_teams_for_date(schedule, target_date)
 
     if not teams_today:
         print(
-            f"[debug] teams_today empty for {target_date}. schedule keys: {list(schedule.keys())}",
-            file=sys.stderr,
-        )
-        print(
-            f"ERROR: No games found for {target_date} in schedule endpoint response.",
+            f"ERROR: No games found for {target_date} in schedule/now window.\n"
+            "Try again closer to game day, or adjust schedule endpoint strategy.",
             file=sys.stderr,
         )
         return 3
 
+    # Predictions-only
+    pred = build_predictions(mp, teams_today)
 
-
-    if is_today:
-        sched = fetch_schedule_now()
-    else:
-        sched = fetch_schedule_for_date(target_date)
-
-
-    # Load DailyFaceoff PP units (fail loudly if missing)
-    pp_df = load_dailyfaceoff_pp(paths, target_date)
-
-    # Predictions-only (DailyFaceoff PP overrides MoneyPuck where available)
-    pred = build_predictions(mp, teams_today, pp_df=pp_df)
-
-    # === CALIBRATION SNAPSHOT (ALWAYS WRITE, EVEN IF SOME COLS MISSING) ===
-    calib_out = paths.data_processed / f"calibration_snapshot_{target_date}.csv"
-
-    wanted_cols = [
-        "name",
-        "team",
-        "player_norm",
-        "pp_unit",
-        "is_pp1",
-        "is_pp2",
-        "xg_per_game",
-        "toi_per_game",
-        "toi_multiplier",
-        "lambda_goal",
-        "goal_probability",
-    ]
-
-    existing_cols = [c for c in wanted_cols if c in pred.columns]
-    missing_cols = [c for c in wanted_cols if c not in pred.columns]
-
-    pred[existing_cols].to_csv(calib_out, index=False)
-    print(f"Saved calibration snapshot: {calib_out}")
-    if missing_cols:
-        print(f"[warn] snapshot missing cols: {missing_cols}")
-
-
-    # === predictions output ===
     pred_out = paths.data_processed / f"predictions_{target_date}.csv"
     pred.sort_values("goal_probability", ascending=False).to_csv(pred_out, index=False)
-
-
-
-
-    # ✅ NEW: log predictions BEFORE odds (so it still logs even if odds are missing)
-    append_predictions_log(paths, target_date, pred)
-    print(f"Appended predictions log: {paths.logs / 'predictions_log.csv'}")
 
     # Console preview
     print("\n🎯 TOP PREDICTIONS (probability ranking)")
     preview = pred.sort_values("goal_probability", ascending=False)[
-        ["name","team","pp_unit","is_pp1","is_pp2","xg_per_game","toi_multiplier","lambda_goal","goal_probability"]
+        ["name", "team", "lambda_goal", "goal_probability", "I_F_goals", "games_played", "is_pp1"]
     ].head(args.top)
     print(preview.to_string(index=False))
-
     print(f"\nSaved predictions: {pred_out}")
-
-    # Strict odds load (fail loudly if missing)
-    odds_df = load_manual_odds(paths, target_date)
-
 
     # Strict odds load (fail loudly if missing)
     odds_df = load_manual_odds(paths, target_date)
@@ -558,7 +364,7 @@ def main() -> int:
         print("\nTop 20 positive EV:")
         print(
             positive_ev[
-                ["player", "team", "odds", "implied_prob", "lambda_goal", "goal_probability", "ev_percent", "is_pp1"]
+                ["player", "team", "odds", "implied_prob", "goal_probability", "ev_percent", "is_pp1"]
             ]
             .head(20)
             .to_string(index=False)
