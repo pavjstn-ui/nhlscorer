@@ -27,3 +27,17 @@ nhl_schedule_today.csv
 notebooks/*.csv
 notebooks/nhl_2025_26_current_season.csv
 
+# notebooks
+*.ipynb
+
+# generated data
+inputs/
+logs/
+
+# experiments
+oneteamextractor.py
+
+# misc
+.DS_Store
+
+
